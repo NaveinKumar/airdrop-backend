@@ -1,3 +1,6 @@
 fastapi
 uvicorn
 firebase-admin
+solana
+solders
+base58
