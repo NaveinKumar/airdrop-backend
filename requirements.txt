@@ -1,6 +1,10 @@
-fastapi
-uvicorn
-firebase-admin
-solana
-solders
-base58
+fastapi==0.110.0
+uvicorn==0.27.1
+
+firebase-admin==6.4.0
+
+solana==0.30.2
+solders==0.18.1
+base58==2.1.1
+
+python-dotenv==1.0.1
