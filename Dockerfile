@@ -1,25 +1,23 @@
 FROM python:3.10-slim
 
-# System deps
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Prevents Python from buffering stdout/stderr
+ENV PYTHONUNBUFFERED=1
 
-# Workdir
 WORKDIR /app
 
-# Copy requirements first (better caching)
-COPY requirements.txt .
+# System deps (minimal)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
+# Install Python deps first (better cache)
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy app code
 COPY . .
 
-# Expose port (Railway expects 8000)
+# Expose Railway port
 EXPOSE 8000
 
-# Run FastAPI
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
