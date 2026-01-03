@@ -1,128 +1,92 @@
 import os
-import base58
-import struct
+import json
+import base64
 
 from fastapi import FastAPI, HTTPException
-from solders.pubkey import Pubkey
-from solders.keypair import Keypair
-from solders.transaction import Transaction
-from solders.instruction import Instruction, AccountMeta
-from solana.rpc.api import Client
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from firebase_admin import credentials, initialize_app, firestore
 
 # ======================================================
-# App
+# App setup
 # ======================================================
-app = FastAPI(title="Airdrop Test Backend")
+app = FastAPI(title="Airdrop Backend", version="1.0.0")
 
-# ======================================================
-# Env vars
-# ======================================================
-SOLANA_RPC = os.getenv("SOLANA_RPC")
-TOKEN_MINT = os.getenv("TOKEN_MINT")
-AIRDROP_SECRET_B58 = os.getenv("AIRDROP_SECRET_B58")
-
-if not SOLANA_RPC or not TOKEN_MINT or not AIRDROP_SECRET_B58:
-    raise RuntimeError("Missing required environment variables")
-
-# ======================================================
-# Solana setup
-# ======================================================
-client = Client(SOLANA_RPC)
-
-MINT_ADDRESS = Pubkey.from_string(TOKEN_MINT)
-
-TOKEN_2022_PROGRAM_ID = Pubkey.from_string(
-    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+# CORS (required for Firebase frontend + browser)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # tighten later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string(
-    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
-)
+# ======================================================
+# Firebase Admin Init
+# ======================================================
+FIREBASE_ADMIN_KEY_B64 = os.getenv("FIREBASE_ADMIN_KEY_B64")
 
-airdrop_keypair = Keypair.from_bytes(
-    base58.b58decode(AIRDROP_SECRET_B58)
-)
+if not FIREBASE_ADMIN_KEY_B64:
+    raise RuntimeError("Missing FIREBASE_ADMIN_KEY_B64")
 
-AIRDROP_PUBKEY = airdrop_keypair.pubkey()
+try:
+    firebase_key_json = base64.b64decode(
+        FIREBASE_ADMIN_KEY_B64
+    ).decode("utf-8")
+    cred_dict = json.loads(firebase_key_json)
+except Exception as e:
+    raise RuntimeError(f"Invalid FIREBASE_ADMIN_KEY_B64: {e}")
+
+cred = credentials.Certificate(cred_dict)
+initialize_app(cred)
+
+db = firestore.client()
+
+print("✅ Firebase Admin initialized")
+print("Project ID:", cred_dict.get("project_id"))
 
 # ======================================================
-# Helpers
+# Models
 # ======================================================
-def find_ata(owner: Pubkey, mint: Pubkey) -> Pubkey:
-    return Pubkey.find_program_address(
-        [bytes(owner), bytes(TOKEN_2022_PROGRAM_ID), bytes(mint)],
-        ASSOCIATED_TOKEN_PROGRAM_ID
-    )[0]
+class ClaimRequest(BaseModel):
+    wallet: str
 
 # ======================================================
 # Routes
 # ======================================================
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "firebase": "connected"
+    }
 
-@app.post("/airdrop-test")
-def airdrop_test(receiver_wallet: str):
-    try:
-        receiver_pubkey = Pubkey.from_string(receiver_wallet)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid receiver wallet")
+@app.get("/env-check")
+def env_check():
+    return {
+        "firebase_key_present": True,
+        "project_id": cred_dict.get("project_id")
+    }
 
-    sender_ata = find_ata(AIRDROP_PUBKEY, MINT_ADDRESS)
-    receiver_ata = find_ata(receiver_pubkey, MINT_ADDRESS)
+@app.post("/claim")
+def claim_airdrop(data: ClaimRequest):
+    """
+    TEMPORARY stub endpoint.
+    This lets you test POST /claim from /docs.
+    """
 
-    mint_info = client.get_token_supply(MINT_ADDRESS).value
-    decimals = mint_info.decimals
-    raw_amount = 1 * (10 ** decimals)
+    if not data.wallet:
+        raise HTTPException(status_code=400, detail="Wallet missing")
 
-    instructions = []
-
-    # Create ATA if missing
-    if client.get_account_info(receiver_ata).value is None:
-        instructions.append(
-            Instruction(
-                program_id=ASSOCIATED_TOKEN_PROGRAM_ID,
-                accounts=[
-                    AccountMeta(AIRDROP_PUBKEY, True, True),
-                    AccountMeta(receiver_ata, False, True),
-                    AccountMeta(receiver_pubkey, False, False),
-                    AccountMeta(MINT_ADDRESS, False, False),
-                    AccountMeta(Pubkey.from_string("11111111111111111111111111111111"), False, False),
-                    AccountMeta(TOKEN_2022_PROGRAM_ID, False, False),
-                    AccountMeta(Pubkey.from_string("SysvarRent111111111111111111111111111111111"), False, False),
-                ],
-                data=b""
-            )
-        )
-
-    # TransferChecked
-    instructions.append(
-        Instruction(
-            program_id=TOKEN_2022_PROGRAM_ID,
-            accounts=[
-                AccountMeta(sender_ata, False, True),
-                AccountMeta(MINT_ADDRESS, False, False),
-                AccountMeta(receiver_ata, False, True),
-                AccountMeta(AIRDROP_PUBKEY, True, False),
-            ],
-            data=struct.pack("<BQB", 12, raw_amount, decimals)
-        )
-    )
-
-    recent = client.get_latest_blockhash().value.blockhash
-
-    tx = Transaction.new_signed_with_payer(
-        instructions=instructions,
-        payer=AIRDROP_PUBKEY,
-        signing_keypairs=[airdrop_keypair],
-        recent_blockhash=recent
-    )
-
-    sig = client.send_raw_transaction(bytes(tx)).value
+    # Example Firestore write (safe test)
+    doc_ref = db.collection("claims").document(data.wallet)
+    doc_ref.set({
+        "wallet": data.wallet,
+        "claimed": True
+    })
 
     return {
         "status": "success",
-        "receiver": receiver_wallet,
-        "tx": sig,
-        "explorer": f"https://explorer.solana.com/tx/{sig}"
+        "wallet": data.wallet
     }
