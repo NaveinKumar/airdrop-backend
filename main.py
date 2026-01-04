@@ -104,7 +104,6 @@ class ClaimRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
 @app.post("/claim")
 def claim_airdrop(
     data: ClaimRequest,
@@ -127,7 +126,7 @@ def claim_airdrop(
     email = decoded.get("email", "")
 
     # -------------------------------
-    # 2. Enforce one-claim-per-user
+    # 2. Firestore lock (ONE CLAIM)
     # -------------------------------
     doc_ref = db.collection("airdrops").document(uid)
     doc = doc_ref.get()
@@ -137,6 +136,15 @@ def claim_airdrop(
             "status": "already_claimed",
             "tx": doc.to_dict().get("tx")
         }
+
+    # 🔒 CREATE LOCK FIRST
+    doc_ref.set({
+        "uid": uid,
+        "email": email,
+        "wallet": data.wallet,
+        "claimed": False,
+        "createdAt": firestore.SERVER_TIMESTAMP
+    })
 
     # -------------------------------
     # 3. Validate wallet
@@ -150,7 +158,7 @@ def claim_airdrop(
     receiver_ata = find_ata(receiver_pubkey, MINT_ADDRESS)
 
     # -------------------------------
-    # 4. Prepare token transfer
+    # 4. Prepare transfer
     # -------------------------------
     mint_info = client.get_token_supply(MINT_ADDRESS).value
     decimals = mint_info.decimals
@@ -158,7 +166,6 @@ def claim_airdrop(
 
     instructions = []
 
-    # Create ATA if missing
     if client.get_account_info(receiver_ata).value is None:
         instructions.append(
             Instruction(
@@ -200,27 +207,32 @@ def claim_airdrop(
     # -------------------------------
     # 5. Send transaction
     # -------------------------------
-    recent = client.get_latest_blockhash().value.blockhash
+    try:
+        recent = client.get_latest_blockhash().value.blockhash
 
-    tx = Transaction.new_signed_with_payer(
-        instructions=instructions,
-        payer=AIRDROP_PUBKEY,
-        signing_keypairs=[airdrop_keypair],
-        recent_blockhash=recent
-    )
+        tx = Transaction.new_signed_with_payer(
+            instructions=instructions,
+            payer=AIRDROP_PUBKEY,
+            signing_keypairs=[airdrop_keypair],
+            recent_blockhash=recent
+        )
 
-    sig = client.send_raw_transaction(bytes(tx)).value
+        sig = client.send_raw_transaction(bytes(tx)).value
+
+    except Exception as e:
+        # ❌ Mark failure (still locked)
+        doc_ref.update({
+            "claimed": False,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=500, detail="Airdrop failed")
 
     # -------------------------------
-    # 6. Save claim
+    # 6. Finalize claim
     # -------------------------------
-    doc_ref.set({
-        "uid": uid,
-        "email": email,
-        "wallet": data.wallet,
-        "tx": sig,
+    doc_ref.update({
         "claimed": True,
-        "createdAt": firestore.SERVER_TIMESTAMP
+        "tx": sig
     })
 
     return {
